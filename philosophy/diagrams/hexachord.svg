@@ -42,5 +42,5 @@
 <ellipse cx="355" cy="335" rx="10" ry="7" fill="#fbbf24" transform="rotate(-20 355 335)"/>
 <ellipse cx="440" cy="328" rx="10" ry="7" fill="#fb7185" transform="rotate(-20 440 328)"/>
 <ellipse cx="525" cy="321" rx="10" ry="7" fill="#60a5fa" transform="rotate(-20 525 321)"/>
-  <text x="36" y="382" fill="#64748b" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">SIVYIS diagram</text>
+  <text x="36" y="382" fill="#64748b" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="11">Cosmoly diagram</text>
 </svg>
