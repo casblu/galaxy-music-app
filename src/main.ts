@@ -296,3 +296,8 @@ function frame(): void {
 }
 
 frame()
+
+// Opt-in test hook (?debug) for headless visual checks; inert otherwise.
+if (new URLSearchParams(location.search).has('debug')) {
+  ;(window as unknown as Record<string, unknown>).__cosmoly = { galaxy, fly }
+}

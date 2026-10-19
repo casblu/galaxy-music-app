@@ -17,6 +17,56 @@ import {
 } from './artists.ts'
 import { GENRE_NEBULA_PHOTO } from './nebulaPhotos.ts'
 
+
+/**
+ * Soft volumetric glow for star spheres. Alpha falls off with view-facing (fresnel) so the
+ * silhouette is always fully transparent — never a hard circle — and fades out as the camera
+ * nears/enters the sphere so close-ups show only soft light.
+ */
+class SoftGlowMaterial extends THREE.ShaderMaterial {
+  constructor(color: THREE.Color, opacity: number, power: number, intensity = 1) {
+    super({
+      uniforms: {
+        uColor: { value: color.clone() },
+        uOpacity: { value: opacity },
+        uPower: { value: power },
+        uIntensity: { value: intensity },
+      },
+      vertexShader: `
+        varying vec3 vN; varying vec3 vV; varying float vNear;
+        void main(){
+          vec4 wp = modelMatrix * vec4(position,1.0);
+          vec3 center = modelMatrix[3].xyz;
+          float radius = length(modelMatrix[0].xyz);
+          vN = normalize(mat3(modelMatrix) * normal);
+          vV = normalize(cameraPosition - wp.xyz);
+          float camD = length(cameraPosition - center);
+          vNear = smoothstep(radius * 0.9, radius * 2.6, camD);
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }`,
+      fragmentShader: `
+        uniform vec3 uColor; uniform float uOpacity; uniform float uPower; uniform float uIntensity;
+        varying vec3 vN; varying vec3 vV; varying float vNear;
+        void main(){
+          float f = clamp(abs(dot(normalize(vN), normalize(vV))), 0.0, 1.0);
+          float a = pow(f, uPower) * smoothstep(0.0, 0.6, f);
+          a *= uOpacity * vNear;
+          if (a < 0.0015) discard;
+          gl_FragColor = vec4(uColor * uIntensity * a, a);
+        }`,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.FrontSide,
+    })
+  }
+  get opacity(): number { return (this as any).uniforms?.uOpacity.value ?? 1 }
+  set opacity(v: number) { const u = (this as any).uniforms; if (u) u.uOpacity.value = v }
+  get emissive(): THREE.Color { return this.uniforms.uColor.value }
+  get emissiveIntensity(): number { return this.uniforms.uIntensity.value }
+  set emissiveIntensity(v: number) { this.uniforms.uIntensity.value = v }
+}
+
 export type StarHandle = {
   artist: Artist
   group: THREE.Group
@@ -344,8 +394,8 @@ export class GalaxyScene {
   private pixelRatioForQuality(q: QualityTier): number {
     const dpr = window.devicePixelRatio || 1
     // Was capped at 2 (looked soft on retina). HD tier now allows up to 3.
-    if (q >= 2) return Math.min(dpr, 3)
-    if (q === 1) return Math.min(dpr, 1.75)
+    if (q >= 2) return Math.min(dpr, 2)
+    if (q === 1) return Math.min(dpr, 1.5)
     return Math.min(dpr, 1.25)
   }
 
@@ -528,8 +578,8 @@ export class GalaxyScene {
       star.glow.scale.setScalar(base * 3.1 * haloMul)
       // Keep pick proxy large enough at all zoom levels
       star.pickProxy.scale.setScalar(star.baseScale * STAR_PICK_RADIUS_MUL * (selected ? 1.15 : 1))
-      const shellMat = star.shell.material as THREE.MeshBasicMaterial
-      const glowMat = star.glow.material as THREE.MeshBasicMaterial
+      const shellMat = star.shell.material as unknown as SoftGlowMaterial
+      const glowMat = star.glow.material as unknown as SoftGlowMaterial
       const amp = playing ? 0.85 + this.playingAmp * 0.35 : 1
       // Outer shells/halos fade faster than core so mist + spark dominate close-up
       const shellFade = 1 - close * 0.92
@@ -537,7 +587,7 @@ export class GalaxyScene {
       shellMat.opacity = (selected ? 0.22 : 0.14) * pulse * amp * shellFade
       glowMat.opacity = (selected ? 0.1 : 0.055) * pulse * amp * haloFade
       // Slightly punchier emissive core when shrunk to a spark (still cinematic, not bloom-wash)
-      const coreMat = star.core.material as THREE.MeshStandardMaterial
+      const coreMat = star.core.material as unknown as SoftGlowMaterial
       coreMat.emissiveIntensity = 1.15 + close * 0.55
     }
 
@@ -588,8 +638,8 @@ export class GalaxyScene {
     }
     // Soften additive shells on low tier (no Sprite glow)
     for (const star of this.stars) {
-      ;(star.shell.material as THREE.MeshBasicMaterial).opacity = q === 0 ? 0.08 : 0.14
-      ;(star.glow.material as THREE.MeshBasicMaterial).opacity = q === 0 ? 0.03 : 0.055
+      ;(star.shell.material as unknown as SoftGlowMaterial).opacity = q === 0 ? 0.08 : 0.14
+      ;(star.glow.material as unknown as SoftGlowMaterial).opacity = q === 0 ? 0.03 : 0.055
     }
     this.applyMistQuality(q)
     this.syncResolution()
@@ -1031,13 +1081,8 @@ export class GalaxyScene {
       const coreScale = artist.size * 1.55
       const core = new THREE.Mesh(
         this.sharedCoreGeo,
-        new THREE.MeshStandardMaterial({
-          color: color.clone().multiplyScalar(0.55),
-          emissive: color,
-          emissiveIntensity: 1.15,
-          roughness: 0.16,
-          metalness: 0.06,
-        }),
+        // Soft hot core: bright centre, fully transparent rim (no hard edge at any distance).
+        new SoftGlowMaterial(color.clone().lerp(new THREE.Color(0xffffff), 0.25), 1, 2.2, 1.15),
       )
       core.scale.setScalar(coreScale)
       core.userData.artistId = artist.id
@@ -1045,13 +1090,7 @@ export class GalaxyScene {
       // Soft volumetric mid shell — additive sphere, always round.
       const shell = new THREE.Mesh(
         this.sharedShellGeo,
-        new THREE.MeshBasicMaterial({
-          color,
-          transparent: true,
-          opacity: 0.14,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-        }),
+        new SoftGlowMaterial(color, 0.14, 1.4),
       )
       shell.scale.setScalar(coreScale * 1.75)
       shell.userData.artistId = artist.id
@@ -1059,13 +1098,7 @@ export class GalaxyScene {
       // Outer halo shell — soft bloom rim without Sprite squares.
       const glow = new THREE.Mesh(
         this.sharedHaloGeo,
-        new THREE.MeshBasicMaterial({
-          color: color.clone().lerp(new THREE.Color(0xffffff), 0.35),
-          transparent: true,
-          opacity: 0.055,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-        }),
+        new SoftGlowMaterial(color.clone().lerp(new THREE.Color(0xffffff), 0.35), 0.055, 1.0),
       )
       glow.scale.setScalar(coreScale * 3.1)
       glow.userData.artistId = artist.id
@@ -1243,7 +1276,7 @@ export class GalaxyScene {
     }
 
     const origin = target.group.position
-    const starColor = (target.core.material as THREE.MeshStandardMaterial).emissive
+    const starColor = (target.core.material as unknown as SoftGlowMaterial).emissive
     const starSize = target.artist.size
     const close = starCloseFactor(bestDist)
     const switched = this.mistStarId !== target.artist.id
