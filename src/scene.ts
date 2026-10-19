@@ -41,7 +41,7 @@ class SoftGlowMaterial extends THREE.ShaderMaterial {
           vN = normalize(mat3(modelMatrix) * normal);
           vV = normalize(cameraPosition - wp.xyz);
           float camD = length(cameraPosition - center);
-          vNear = smoothstep(radius * 0.9, radius * 2.6, camD);
+          vNear = smoothstep(radius * 0.5, radius * 1.8, camD);
           gl_Position = projectionMatrix * viewMatrix * wp;
         }`,
       fragmentShader: `
@@ -49,10 +49,11 @@ class SoftGlowMaterial extends THREE.ShaderMaterial {
         varying vec3 vN; varying vec3 vV; varying float vNear;
         void main(){
           float f = clamp(abs(dot(normalize(vN), normalize(vV))), 0.0, 1.0);
-          float a = pow(f, uPower) * smoothstep(0.0, 0.6, f);
+          float a = pow(f, uPower) * smoothstep(0.0, 0.35, f);
           a *= uOpacity * vNear;
           if (a < 0.0015) discard;
-          gl_FragColor = vec4(uColor * uIntensity * a, a);
+          // AdditiveBlending already multiplies by alpha — do not premultiply (that squared the falloff and killed bloom/mist).
+          gl_FragColor = vec4(uColor * uIntensity, a);
         }`,
       transparent: true,
       depthWrite: false,
@@ -588,7 +589,7 @@ export class GalaxyScene {
       glowMat.opacity = (selected ? 0.1 : 0.055) * pulse * amp * haloFade
       // Slightly punchier emissive core when shrunk to a spark (still cinematic, not bloom-wash)
       const coreMat = star.core.material as unknown as SoftGlowMaterial
-      coreMat.emissiveIntensity = 1.15 + close * 0.55
+      coreMat.emissiveIntensity = 1.6 + close * 0.55
     }
 
     this.updateStarMist(t, this.lastDt)
@@ -1082,7 +1083,7 @@ export class GalaxyScene {
       const core = new THREE.Mesh(
         this.sharedCoreGeo,
         // Soft hot core: bright centre, fully transparent rim (no hard edge at any distance).
-        new SoftGlowMaterial(color.clone().lerp(new THREE.Color(0xffffff), 0.25), 1, 2.2, 1.15),
+        new SoftGlowMaterial(color.clone().lerp(new THREE.Color(0xffffff), 0.25), 1, 0.9, 1.6),
       )
       core.scale.setScalar(coreScale)
       core.userData.artistId = artist.id
@@ -1090,7 +1091,7 @@ export class GalaxyScene {
       // Soft volumetric mid shell — additive sphere, always round.
       const shell = new THREE.Mesh(
         this.sharedShellGeo,
-        new SoftGlowMaterial(color, 0.14, 1.4),
+        new SoftGlowMaterial(color, 0.14, 0.7),
       )
       shell.scale.setScalar(coreScale * 1.75)
       shell.userData.artistId = artist.id
@@ -1098,7 +1099,7 @@ export class GalaxyScene {
       // Outer halo shell — soft bloom rim without Sprite squares.
       const glow = new THREE.Mesh(
         this.sharedHaloGeo,
-        new SoftGlowMaterial(color.clone().lerp(new THREE.Color(0xffffff), 0.35), 0.055, 1.0),
+        new SoftGlowMaterial(color.clone().lerp(new THREE.Color(0xffffff), 0.35), 0.055, 0.5),
       )
       glow.scale.setScalar(coreScale * 3.1)
       glow.userData.artistId = artist.id
