@@ -547,9 +547,9 @@ export class FlyControls {
     if (!this.enabled) return
     if (!this.pointerLocked) return
     if (this.navMode !== 'fly') return
-    // INVERTED as currently shipped
-    this.pendYaw += e.movementX * LOOK_SENS
-    this.pendPitch += e.movementY * LOOK_SENS
+    // Desktop mouse look: reversed per Txai (Oct 2026)
+    this.pendYaw -= e.movementX * LOOK_SENS
+    this.pendPitch -= e.movementY * LOOK_SENS
   }
 
   private onWheel = (e: WheelEvent): void => {
@@ -690,9 +690,10 @@ export class FlyControls {
     }
     if (!this.moved) return
 
-    // INVERTED yaw/pitch as currently shipped
-    const dYaw = dx * TOUCH_LOOK
-    const dPitch = dy * TOUCH_LOOK
+    // Mouse drag is reversed vs touch (per Txai, Oct 2026); touch unchanged.
+    const inv = e.pointerType === 'mouse' ? -1 : 1
+    const dYaw = dx * TOUCH_LOOK * inv
+    const dPitch = dy * TOUCH_LOOK * inv
     this.pendYaw += dYaw
     this.pendPitch += dPitch
     this.yawVel = dYaw * 0.6
