@@ -73,8 +73,18 @@ ui.onMute = (muted) => audio.setMuted(muted)
 ui.onClosePanel = () => {
   galaxy.setSelected(null)
 }
+const realAudio = new Audio()
+realAudio.preload = 'none'
 ui.onSelectTrack = (artist, index) => {
   void audio.start()
+  const t = artist.tracks[index]
+  if (t?.audioUrl) {
+    audio.stopAll()
+    realAudio.src = t.audioUrl
+    void realAudio.play().catch(() => {})
+    return
+  }
+  realAudio.pause()
   audio.playTrackCue(artist, index)
 }
 

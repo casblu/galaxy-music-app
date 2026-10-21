@@ -9,7 +9,10 @@
 This is an early **demo**.
 
 - The Bitcoin wallet is **simulated**: balances live only in your browser's `localStorage`. No real money or keys are involved.
-- Artists and tracks are **sample content**, not a streaming catalog. Audio is short generated cues.
+- Built-in artists are **sample content** with generated cues. On top of that, an **open catalog** of real independent artists is loaded from two sources (`npm run catalog` → `src/openCatalog.json`):
+  - **V4V / Podcasting 2.0 music RSS** (`podcast:medium=music`), parsing `podcast:value` / `valueRecipient` Lightning splits. With `PODCASTINDEX_API_KEY` + `PODCASTINDEX_API_SECRET` set, feeds come from Podcast Index `podcasts/bymedium?medium=music`; without a key, feeds are discovered via Wavlake's public rankings → `wavlake.com/feed/music/<album>`.
+  - **Nostr music events** from public relays: kinds 36787, 30440 (Wavlake draft music NIP) and audio-only 31337, plus kind 0 profiles for `lud16` zap addresses.
+  - Artists in both sources are merged by name. Pay targets are displayed only; no payments are made. `npm test` checks parsing + live loading.
 - **Nostr login, artist releases as Nostr events, and Lightning zaps are planned, not built.**
 - Some philosopher portraits are placeholders pending a license check (see `ATTRIBUTIONS.md`).
 
