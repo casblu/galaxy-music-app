@@ -1678,3 +1678,4 @@ kbd {
 .open-pay code { font-size: 11px; word-break: break-all; }
 .pay-list { list-style: none; padding: 0; margin: 4px 0 8px; font-size: 12px; }
 .pay-target { font-size: 12px; margin: 2px 0 8px; }
+.memorial-line { margin: 2px 0 8px; font-size: 13px; letter-spacing: .04em; color: #ffe7b0; text-shadow: 0 0 10px rgba(255,215,140,.6); }

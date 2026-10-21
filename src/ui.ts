@@ -13,6 +13,7 @@ import { philosophyPageHtml } from './philosophy.ts'
 import { mountPhilosophyWeb, type PhilosophyWebHandle } from './philosophyWeb.ts'
 import { mountMusicHistory, type MusicHistoryHandle } from './musicHistory.ts'
 import { formatBtc, wallet } from './wallet.ts'
+import { memorialYears } from './memorials.ts'
 
 export type AppTab = 'galaxy' | 'philosophy' | 'history' | 'profile'
 
@@ -371,6 +372,7 @@ export class UI {
       <p class="kicker">${escapeHtml(artist.genre)} · ${escapeHtml(artist.subgenre)}</p>
       ${alsoInLine(artist)}
       <h2>${escapeHtml(artist.name)}</h2>
+      ${artist.memorial ? `<p class="memorial-line">✦ In memoriam · ${memorialYears(artist.memorial)}${artist.memorial.place ? ' · ' + escapeHtml(artist.memorial.place) : ''}</p>` : ''}
       ${openBadges(artist)}
       <p class="bio">${escapeHtml(artist.bio)}</p>
       ${artist.open ? openPayHtml(artist) : '<p class="demo-note">Audio is a royalty-safe procedural demo generated in your browser — not a copyrighted recording. Song titles are listed for reference only.</p>'}

@@ -23,6 +23,8 @@ import { GENRE_NEBULA_PHOTO } from './nebulaPhotos.ts'
  * silhouette is always fully transparent — never a hard circle — and fades out as the camera
  * nears/enters the sphere so close-ups show only soft light.
  */
+const MEMORIAL_GOLD = 0xffe7b0
+
 class SoftGlowMaterial extends THREE.ShaderMaterial {
   constructor(color: THREE.Color, opacity: number, power: number, intensity = 1) {
     super({
@@ -80,6 +82,8 @@ export type StarHandle = {
   pulse: number
   /** Cached base core scale (artist.size * 1.55). */
   baseScale: number
+  /** Extra wide warm halo for memorial stars */
+  memorialHalo?: THREE.Mesh
 }
 
 export type NebulaHandle = {
@@ -590,6 +594,16 @@ export class GalaxyScene {
       // Slightly punchier emissive core when shrunk to a spark (still cinematic, not bloom-wash)
       const coreMat = star.core.material as unknown as SoftGlowMaterial
       coreMat.emissiveIntensity = 1.6 + close * 0.55
+      if (star.memorialHalo) {
+        // Gentle two-frequency shimmer; brighter and readable from far zoom.
+        const shimmer = 0.85 + Math.sin(t * 1.3 + star.pulse) * 0.1 + Math.sin(t * 3.7 + star.pulse * 2) * 0.05
+        coreMat.emissiveIntensity = (2.6 + close * 0.6) * shimmer
+        shellMat.opacity = (selected ? 0.32 : 0.24) * shimmer * amp * (1 - close * 0.8)
+        glowMat.opacity = (selected ? 0.16 : 0.11) * shimmer * amp * (1 - close * 0.85)
+        const farBoost = 1 + Math.min(1, dist / 120) * 0.8
+        star.memorialHalo.scale.setScalar(star.baseScale * 7 * farBoost * (0.96 + shimmer * 0.06))
+        ;(star.memorialHalo.material as unknown as SoftGlowMaterial).opacity = 0.09 * shimmer * (1 - close * 0.9)
+      }
     }
 
     this.updateStarMist(t, this.lastDt)
@@ -1077,9 +1091,11 @@ export class GalaxyScene {
       group.position.set(...artist.position)
       group.userData.artistId = artist.id
 
+      const isMemorial = !!artist.memorial
+      // Memorial stars: warm gold-white tint and larger core.
       const color = new THREE.Color(artist.color)
-      // Bright solid orb core — larger so it reads as a ball, not a pixel.
-      const coreScale = artist.size * 1.55
+      if (isMemorial) color.lerp(new THREE.Color(MEMORIAL_GOLD), 0.65)
+      const coreScale = artist.size * 1.55 * (isMemorial ? 1.45 : 1)
       const core = new THREE.Mesh(
         this.sharedCoreGeo,
         // Soft hot core: bright centre, fully transparent rim (no hard edge at any distance).
@@ -1118,6 +1134,17 @@ export class GalaxyScene {
       pickProxy.scale.setScalar(coreScale * STAR_PICK_RADIUS_MUL)
       pickProxy.userData.artistId = artist.id
 
+      let memorialHalo: THREE.Mesh | undefined
+      if (isMemorial) {
+        memorialHalo = new THREE.Mesh(
+          this.sharedHaloGeo,
+          new SoftGlowMaterial(new THREE.Color(MEMORIAL_GOLD), 0.09, 0.35, 1.4),
+        )
+        memorialHalo.scale.setScalar(coreScale * 7)
+        memorialHalo.userData.artistId = artist.id
+        group.add(memorialHalo)
+      }
+
       group.add(glow)
       group.add(shell)
       group.add(core)
@@ -1133,6 +1160,7 @@ export class GalaxyScene {
         pickProxy,
         pulse: hash(artist.name.length, 4.2) * Math.PI * 2,
         baseScale: coreScale,
+        memorialHalo,
       }
       this.stars.push(handle)
       this.starById.set(artist.id, handle)

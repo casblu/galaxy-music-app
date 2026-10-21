@@ -1,4 +1,5 @@
 import openCatalog from './openCatalog.json'
+import { MEMORIALS, type Memorial } from './memorials.ts'
 import {
   GENRE_BALL_RADIUS,
   GENRE_CLUSTER_RADIUS,
@@ -127,6 +128,8 @@ export type Artist = {
   audio: AudioPreset
   /** Present for artists loaded from the open V4V RSS / Nostr catalog */
   open?: OpenInfo
+  /** Set when the artist has died — renders as a memorial star (see memorials.ts) */
+  memorial?: Memorial
 }
 
 const PENT = [0, 3, 5, 7, 10]
@@ -1555,6 +1558,7 @@ function placeAtSubgenre(
     position: [x, y, z],
     audio: { ...sub.audio },
     open: seed.open,
+    memorial: MEMORIALS[seed.id],
   }
 }
 
