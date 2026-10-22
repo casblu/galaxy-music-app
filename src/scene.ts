@@ -17,6 +17,7 @@ import {
   type Subgenre,
 } from './artists.ts'
 import { GENRE_NEBULA_PHOTO } from './nebulaPhotos.ts'
+import { buildSkeleton, maskBank, puffTexture, dustTexture, rng, type SkelPoint } from './nebulaShape.ts'
 
 
 /**
@@ -97,9 +98,14 @@ export type StarHandle = {
 export type NebulaHandle = {
   genre: Genre
   group: THREE.Group
-  planes: THREE.Mesh[]
-  /** Soft additive glow spheres (volumetric depth). */
-  glows: THREE.Mesh[]
+  /** Merged billboard puff meshes (one draw per texture). */
+  puffMeshes: THREE.Mesh[]
+  puffMats: THREE.ShaderMaterial[]
+  /** World-space skeleton points + radii for the proximity metric. */
+  skel: THREE.Vector3[]
+  skelR: number[]
+  /** Signed distance (world units) from camera to cloud surface, updated per frame. */
+  surfDist: number
   particles: THREE.Points
   /** Base particle opacity at current quality (before distance fade). */
   particleBaseOpacity: number
@@ -159,7 +165,7 @@ function nebulaSmokeOpacityMul(dist: number, radius: number): number {
   return NEBULA_SMOKE_MIN_MUL + (1 - NEBULA_SMOKE_MIN_MUL) * s
 }
 
-function nebulaTexture(c1: string, c2: string, seed: number): THREE.CanvasTexture {
+export function nebulaTexture(c1: string, c2: string, seed: number): THREE.CanvasTexture {
   // High-res procedural fallback when photo textures are still loading.
   const size = 1536
   const canvas = document.createElement('canvas')
@@ -234,7 +240,7 @@ function softParticleTexture(): THREE.CanvasTexture {
  * Soft-masked NASA nebula billboard (one shared texture per genre — GPU-friendly).
  * Cover-crops photo into a circular alpha disk so PlaneGeometry never shows square edges.
  */
-function photoNebulaTexture(img: HTMLImageElement, tintHex: number, seed = 1): THREE.CanvasTexture {
+export function photoNebulaTexture(img: HTMLImageElement, tintHex: number, seed = 1): THREE.CanvasTexture {
   const size = 1536
   const canvas = document.createElement('canvas')
   canvas.width = size
@@ -315,6 +321,7 @@ export class GalaxyScene {
     particleBaseSize: number
   }[] = []
   nebulaHandles: NebulaHandle[] = []
+  private nebulaByGenre = new Map<string, NebulaHandle>()
   private starById = new Map<string, StarHandle>()
   private raycaster = new THREE.Raycaster()
   private genreVis = new Map<string, number>()
@@ -488,6 +495,8 @@ export class GalaxyScene {
   nearby(origin: THREE.Vector3, radius: number): { artist: Artist; distance: number }[] {
     const out: { artist: Artist; distance: number }[] = []
     for (const star of this.stars) {
+      // Hidden (not-yet-faded-in) stars stay silent.
+      if (star.vis < 0.35) continue
       const d = origin.distanceTo(star.group.position)
       if (d <= radius) out.push({ artist: star.artist, distance: d })
     }
@@ -525,52 +534,22 @@ export class GalaxyScene {
 
     const camPos = this.camera.position
     for (const neb of this.nebulaHandles) {
-      const genreCenter = neb.group.position
-      const distToGenre = camPos.distanceTo(genreCenter)
-      const smokeMul = nebulaSmokeOpacityMul(distToGenre, neb.genre.radius)
-
-      for (const plane of neb.planes) {
-        plane.lookAt(this.camera.position)
-        plane.rotation.z = (plane.userData.spin as number) + t * (plane.userData.spinSpeed as number)
-        // Subtle breathing scale for living smoke
-        const breath = 1 + Math.sin(t * 0.35 + (plane.userData.spin as number)) * 0.03
-        plane.scale.setScalar(breath)
-        const pMat = plane.material as THREE.MeshBasicMaterial
-        const baseOp = (plane.userData.baseOpacity as number) ?? pMat.opacity
-        pMat.opacity = baseOp * smokeMul
+      // Distance to the irregular cloud surface (nearest skeleton puff), not to a sphere.
+      let sd = Infinity
+      for (let i = 0; i < neb.skel.length; i++) {
+        const d = camPos.distanceTo(neb.skel[i]) - neb.skelR[i]
+        if (d < sd) sd = d
       }
-      for (const glow of neb.glows) {
-        const gMat = glow.material as THREE.MeshBasicMaterial
-        const baseOp = (glow.userData.baseOpacity as number) ?? gMat.opacity
-        gMat.opacity = baseOp * smokeMul
+      neb.surfDist = sd
+      // Map to the legacy centre-distance scale (surface ~= 1.0R) for the smoke LOD.
+      const smokeMul = nebulaSmokeOpacityMul(neb.genre.radius * (1 + sd / neb.genre.radius) , neb.genre.radius)
+      for (const m of neb.puffMats) {
+        m.uniforms.uTime.value = t
+        m.uniforms.uOpacity.value = (m.userData.baseOpacity as number) * smokeMul
       }
       const pm = neb.particles.material as THREE.PointsMaterial
       pm.opacity = neb.particleBaseOpacity * smokeMul
       pm.size = neb.particleBaseSize * (0.45 + 0.55 * smokeMul)
-      neb.particles.rotation.y = t * 0.015 * (neb.genre.id.length % 3 === 0 ? 1 : -1)
-    }
-
-    for (const neb of this.subNebulaHandles) {
-      const distToSub = camPos.distanceTo(neb.group.position)
-      const smokeMul = nebulaSmokeOpacityMul(distToSub, neb.sub.radius)
-      for (const plane of neb.planes) {
-        plane.lookAt(this.camera.position)
-        plane.rotation.z = (plane.userData.spin as number) + t * (plane.userData.spinSpeed as number)
-        const breath = 1 + Math.sin(t * 0.42 + (plane.userData.spin as number)) * 0.04
-        plane.scale.setScalar(breath)
-        const pMat = plane.material as THREE.MeshBasicMaterial
-        const baseOp = (plane.userData.baseOpacity as number) ?? pMat.opacity
-        pMat.opacity = baseOp * smokeMul
-      }
-      for (const glow of neb.glows) {
-        const gMat = glow.material as THREE.MeshBasicMaterial
-        const baseOp = (glow.userData.baseOpacity as number) ?? gMat.opacity
-        gMat.opacity = baseOp * smokeMul
-      }
-      const pm = neb.particles.material as THREE.PointsMaterial
-      pm.opacity = neb.particleBaseOpacity * smokeMul
-      pm.size = neb.particleBaseSize * (0.45 + 0.55 * smokeMul)
-      neb.particles.rotation.y = t * 0.02
     }
 
     const cam = this.camera.position
@@ -579,7 +558,9 @@ export class GalaxyScene {
     for (const star of this.stars) {
       let v = this.genreVis.get(star.artist.genreId)
       if (v === undefined) {
-        const k = cam.distanceTo(star.genreCenter) / star.genreRadius
+        const neb = this.nebulaByGenre.get(star.artist.genreId)
+        // surface distance: k = 1 at the cloud edge, fade out by 0.6R beyond it
+        const k = neb ? 1 + neb.surfDist / star.genreRadius : cam.distanceTo(star.genreCenter) / star.genreRadius
         const x = Math.max(0, Math.min(1, (STAR_VIS_FAR - k) / (STAR_VIS_FAR - STAR_VIS_NEAR)))
         v = x * x * (3 - 2 * x)
         this.genreVis.set(star.artist.genreId, v)
@@ -689,21 +670,13 @@ export class GalaxyScene {
     this.syncResolution()
     // Hide outer smoke layers on low tiers for phone FPS.
     for (const neb of this.nebulaHandles) {
-      neb.planes.forEach((plane, i) => {
-        plane.visible = q === 2 ? true : q === 1 ? i < 4 : i < 2
-      })
-      neb.particleBaseOpacity = q === 2 ? 0.38 : q === 1 ? 0.28 : 0.18
+      for (const mesh of neb.puffMeshes) {
+        const n = mesh.userData.puffCount as number
+        const keep = q === 2 ? n : q === 1 ? Math.ceil(n * 0.7) : Math.ceil(n * 0.45)
+        mesh.geometry.setDrawRange(0, keep * 6)
+      }
+      neb.particleBaseOpacity = q === 2 ? 0.34 : q === 1 ? 0.26 : 0.16
       neb.particleBaseSize = q === 2 ? 0.7 : q === 1 ? 0.55 : 0.42
-      const pm = neb.particles.material as THREE.PointsMaterial
-      pm.opacity = neb.particleBaseOpacity
-      pm.size = neb.particleBaseSize
-    }
-    for (const neb of this.subNebulaHandles) {
-      neb.planes.forEach((plane, i) => {
-        plane.visible = q === 2 ? true : q === 1 ? i < 2 : i < 1
-      })
-      neb.particleBaseOpacity = q === 2 ? 0.28 : q === 1 ? 0.2 : 0.12
-      neb.particleBaseSize = q === 2 ? 0.5 : q === 1 ? 0.4 : 0.3
       const pm = neb.particles.material as THREE.PointsMaterial
       pm.opacity = neb.particleBaseOpacity
       pm.size = neb.particleBaseSize
@@ -850,239 +823,184 @@ export class GalaxyScene {
   }
 
   private spawnGenreNebulae(): void {
+    const masks = maskBank()
     GENRES.forEach((genre, gi) => {
       const group = new THREE.Group()
       group.position.set(...genre.center)
       group.userData.genreId = genre.id
+      const R = genre.radius
+      const center = group.position.clone()
+      const subs = SUBGENRES.filter((s) => s.parentId === genre.id)
+      const anchors = subs.map((s) => new THREE.Vector3(...s.center).sub(center))
+      const skel = buildSkeleton(gi * 7919 + 31, R, anchors)
+      const r = rng(gi * 131 + 7)
+      const base = new THREE.Color(genre.color)
 
-      const planes: THREE.Mesh[] = []
-      // Smoky volumetric layers — more translucent billboards with parallax offsets
-      const layerDefs = [
-        { w: 3.6, h: 2.7, op: 0.32, spin: 0.01 },
-        { w: 3.1, h: 2.4, op: 0.26, spin: -0.014 },
-        { w: 2.6, h: 2.1, op: 0.2, spin: 0.018 },
-        { w: 2.2, h: 1.8, op: 0.16, spin: -0.011 },
-        { w: 1.85, h: 1.55, op: 0.12, spin: 0.022 },
-        { w: 1.5, h: 1.35, op: 0.09, spin: -0.016 },
+      // Puff layers: [maskKind, variant] → one merged mesh each.
+      type Puff = { p: THREE.Vector3; sx: number; sy: number; rot: number; spin: number; a: number; c: THREE.Color }
+      const layers: { kind: 'wisp' | 'knot' | 'pillar' | 'dust'; mask: HTMLCanvasElement; puffs: Puff[]; op: number }[] = [
+        { kind: 'wisp', mask: masks.wisp[gi % 4], puffs: [], op: 0.36 },
+        { kind: 'wisp', mask: masks.wisp[(gi + 2) % 4], puffs: [], op: 0.32 },
+        { kind: 'pillar', mask: masks.pillar[gi % 2], puffs: [], op: 0.34 },
+        { kind: 'knot', mask: masks.knot[gi % 2], puffs: [], op: 0.4 },
+        { kind: 'dust', mask: masks.dust[gi % 3], puffs: [], op: 0.55 },
       ]
-
-      // Procedural fallback until NASA photo loads
-      layerDefs.forEach((layer, i) => {
-        const mat = new THREE.MeshBasicMaterial({
-          map: nebulaTexture(genre.nebulaA, genre.nebulaB, gi * 17 + i * 3),
-          color: new THREE.Color(genre.color),
-          transparent: true,
-          alphaTest: 0.015,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-          side: THREE.DoubleSide,
-          opacity: layer.op,
+      const subColor = (p: THREE.Vector3): THREE.Color => {
+        let best = base, bd = Infinity
+        subs.forEach((s, i) => {
+          const d = p.distanceTo(anchors[i])
+          if (d < bd) { bd = d; best = new THREE.Color(s.color) }
         })
-        const mesh = new THREE.Mesh(
-          new THREE.PlaneGeometry(genre.radius * layer.w, genre.radius * layer.h),
-          mat,
-        )
-        mesh.position.set(
-          (hash(gi, i + 1) - 0.5) * genre.radius * 0.55,
-          (hash(gi, i + 2) - 0.5) * genre.radius * 0.4,
-          (hash(gi, i + 3) - 0.5) * genre.radius * 0.55,
-        )
-        mesh.userData.spin = hash(gi, i + 4) * Math.PI * 2
-        mesh.userData.spinSpeed = layer.spin + hash(gi, i + 5) * 0.008
-        mesh.userData.parallax = 0.35 + hash(gi, i + 6) * 0.55
-        mesh.userData.baseOpacity = layer.op
-        planes.push(mesh)
-        group.add(mesh)
-      })
-
-      const color = new THREE.Color(genre.color)
-      const glows: THREE.Mesh[] = []
-      // Soft volumetric glow spheres for depth (not just flat billboards)
-      for (let s = 0; s < 2; s++) {
-        const glowOp = 0.03 - s * 0.01
-        const glowSphere = new THREE.Mesh(
-          new THREE.SphereGeometry(genre.radius * (0.85 - s * 0.2), 28, 28),
-          new THREE.MeshBasicMaterial({
-            color: color.clone().offsetHSL(0, -0.05, s === 0 ? 0 : 0.08),
-            transparent: true,
-            opacity: glowOp,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-          }),
-        )
-        glowSphere.position.set(
-          (hash(gi, 40 + s) - 0.5) * genre.radius * 0.15,
-          (hash(gi, 41 + s) - 0.5) * genre.radius * 0.1,
-          (hash(gi, 42 + s) - 0.5) * genre.radius * 0.15,
-        )
-        glowSphere.userData.baseOpacity = glowOp
-        glows.push(glowSphere)
-        group.add(glowSphere)
+        return base.clone().lerp(best, 0.5)
+      }
+      const jitter = (k: number) => new THREE.Vector3(r() - 0.5, r() - 0.5, r() - 0.5).multiplyScalar(k)
+      for (const sp of skel as SkelPoint[]) {
+        const c = subColor(sp.p)
+        const lum = 0.55 + r() * 0.75 // uneven bright/dim
+        if (sp.pillar) {
+          layers[2].puffs.push({ p: sp.p.clone().add(jitter(sp.r * 0.3)), sx: sp.r * 1.6, sy: sp.r * 3.4, rot: (r() - 0.5) * 0.5, spin: 0, a: lum, c })
+        } else {
+          const L = layers[r() < 0.5 ? 0 : 1]
+          const el = 1.1 + r() * 0.8
+          L.puffs.push({ p: sp.p.clone().add(jitter(sp.r * 0.5)), sx: sp.r * 3.0 * el, sy: sp.r * 3.0 / el, rot: r() * Math.PI * 2, spin: (r() - 0.5) * 0.02, a: lum, c })
+          layers[L === layers[0] ? 1 : 0].puffs.push({ p: sp.p.clone().add(jitter(sp.r)), sx: sp.r * 2.4, sy: sp.r * 1.8, rot: r() * Math.PI * 2, spin: (r() - 0.5) * 0.03, a: lum * 0.8, c })
+        }
+        if (r() < 0.22) layers[3].puffs.push({ p: sp.p.clone().add(jitter(sp.r * 0.8)), sx: sp.r * 0.8, sy: sp.r * 0.6, rot: r() * 6.28, spin: 0, a: 0.8 + r(), c: c.clone().lerp(new THREE.Color(0xffffff), 0.35) })
+        if (r() < 0.16 && sp.t > 0.15) layers[4].puffs.push({ p: sp.p.clone().add(jitter(sp.r * 0.6)), sx: sp.r * 2.4, sy: sp.r * 0.7, rot: r() * 6.28, spin: 0, a: 0.6 + r() * 0.4, c })
       }
 
-      const particles = this.makeClusterParticles(genre, gi)
-      group.add(particles)
-
-      this.scene.add(group)
-      this.nebulaHandles.push({
-        genre,
-        group,
-        planes,
-        glows,
-        particles,
-        particleBaseOpacity: 0.38,
-        particleBaseSize: 0.7,
+      const puffMeshes: THREE.Mesh[] = []
+      const puffMats: THREE.ShaderMaterial[] = []
+      layers.forEach((L, li) => {
+        if (!L.puffs.length) return
+        // shuffle so quality-tier drawRange keeps an even subset
+        for (let i = L.puffs.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [L.puffs[i], L.puffs[j]] = [L.puffs[j], L.puffs[i]] }
+        const n = L.puffs.length
+        const cen = new Float32Array(n * 12), cor = new Float32Array(n * 8), siz = new Float32Array(n * 8)
+        const rot = new Float32Array(n * 8), col = new Float32Array(n * 16)
+        const idx: number[] = []
+        const corners = [-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, 0.5]
+        L.puffs.forEach((pf, i) => {
+          for (let v = 0; v < 4; v++) {
+            const k = i * 4 + v
+            cen.set([pf.p.x, pf.p.y, pf.p.z], k * 3)
+            cor.set([corners[v * 2], corners[v * 2 + 1]], k * 2)
+            siz.set([pf.sx, pf.sy], k * 2)
+            rot.set([pf.rot, pf.spin], k * 2)
+            col.set([pf.c.r, pf.c.g, pf.c.b, pf.a], k * 4)
+          }
+          const o = i * 4
+          idx.push(o, o + 1, o + 2, o, o + 2, o + 3)
+        })
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.BufferAttribute(cen, 3))
+        geo.setAttribute('corner', new THREE.BufferAttribute(cor, 2))
+        geo.setAttribute('psize', new THREE.BufferAttribute(siz, 2))
+        geo.setAttribute('prot', new THREE.BufferAttribute(rot, 2))
+        geo.setAttribute('pcol', new THREE.BufferAttribute(col, 4))
+        geo.setIndex(idx)
+        geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), R * 3)
+        const dust = L.kind === 'dust'
+        const mat = new THREE.ShaderMaterial({
+          uniforms: {
+            map: { value: dust ? dustTexture(L.mask) : puffTexture(L.mask, null, base, gi * 17 + li) },
+            uOpacity: { value: L.op },
+            uTime: { value: 0 },
+          },
+          vertexShader: `
+            attribute vec2 corner; attribute vec2 psize; attribute vec2 prot; attribute vec4 pcol;
+            uniform float uTime; varying vec2 vUv; varying vec4 vCol;
+            void main(){
+              vec4 mv = modelViewMatrix * vec4(position, 1.0);
+              float a = prot.x + uTime * prot.y;
+              float c = cos(a), s = sin(a);
+              vec2 q = corner * psize;
+              mv.xy += vec2(c*q.x - s*q.y, s*q.x + c*q.y);
+              // fade puffs the camera is inside (keeps interior clear, no screen-filling quads)
+              float near = smoothstep(min(psize.x, psize.y) * 0.2, max(psize.x, psize.y) * 0.7, -mv.z);
+              vUv = corner + 0.5; vCol = vec4(pcol.rgb, pcol.a * near);
+              gl_Position = projectionMatrix * mv;
+            }`,
+          fragmentShader: dust
+            ? `uniform sampler2D map; uniform float uOpacity; varying vec2 vUv; varying vec4 vCol;
+               void main(){ float a = texture2D(map, vUv).a * vCol.a * uOpacity; if (a < 0.004) discard; gl_FragColor = vec4(0.0,0.0,0.0,a); }`
+            : `uniform sampler2D map; uniform float uOpacity; varying vec2 vUv; varying vec4 vCol;
+               void main(){ vec4 t = texture2D(map, vUv); float a = t.a * vCol.a * uOpacity; if (a < 0.004) discard;
+                 gl_FragColor = vec4(t.rgb * mix(vec3(1.0), vCol.rgb * 1.4, 0.45) * a, a); }`,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.CustomBlending,
+          blendEquation: THREE.AddEquation,
+          // emissive puffs: additive (premultiplied rgb); dust lanes: darken what is behind
+          blendSrc: dust ? THREE.ZeroFactor : THREE.OneFactor,
+          blendDst: dust ? THREE.OneMinusSrcAlphaFactor : THREE.OneFactor,
+        })
+        mat.userData.baseOpacity = L.op
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.frustumCulled = false
+        mesh.renderOrder = dust ? 2 : 1
+        mesh.userData.puffCount = n
+        mesh.userData.layer = L
+        group.add(mesh)
+        puffMeshes.push(mesh)
+        puffMats.push(mat)
       })
 
-      // Swap in real NASA photography (public domain) when loaded
+      const particles = this.makeClusterParticles(genre, gi, skel)
+      group.add(particles)
+      this.scene.add(group)
+      const handle: NebulaHandle = {
+        genre,
+        group,
+        puffMeshes,
+        puffMats,
+        skel: skel.map((sp) => sp.p.clone().add(center)),
+        skelR: skel.map((sp) => sp.r * 1.15),
+        surfDist: Infinity,
+        particles,
+        particleBaseOpacity: 0.34,
+        particleBaseSize: 0.7,
+      }
+      this.nebulaHandles.push(handle)
+      this.nebulaByGenre.set(genre.id, handle)
+
+      // Swap in real NASA photography (public domain) when loaded — cut by the same irregular masks.
       const photo = GENRE_NEBULA_PHOTO[genre.id]
       void loadNebulaImage(photo.src)
         .then((img) => {
-          const photoTex = photoNebulaTexture(img, genre.color, gi * 13)
-          for (const plane of planes) {
-            const mat = plane.material as THREE.MeshBasicMaterial
-            const old = mat.map
-            mat.map = photoTex
-            mat.color.set(genre.color).lerp(new THREE.Color(0xffffff), 0.12)
-            const nextOp = Math.min(0.38, ((plane.userData.baseOpacity as number) ?? mat.opacity) + 0.02)
-            plane.userData.baseOpacity = nextOp
-            mat.opacity = nextOp
-            mat.needsUpdate = true
-            old?.dispose()
-          }
+          puffMeshes.forEach((mesh, li) => {
+            const L = mesh.userData.layer as { kind: string; mask: HTMLCanvasElement }
+            if (L.kind === 'dust') return
+            const mat = mesh.material as THREE.ShaderMaterial
+            const old = mat.uniforms.map.value as THREE.Texture
+            mat.uniforms.map.value = puffTexture(L.mask, img, base, gi * 29 + li)
+            old.dispose()
+          })
         })
         .catch(() => {
-          /* keep procedural fallback */
+          /* keep tinted fallback */
         })
     })
   }
 
-  private spawnSubgenreNebulae(): void {
-    SUBGENRES.forEach((sub, si) => {
-      const group = new THREE.Group()
-      group.position.set(...sub.center)
-      group.userData.subgenreId = sub.id
+  /** Subgenre smoke is now part of the parent's organic cloud (branches pass through each subgenre). */
+  private spawnSubgenreNebulae(): void {}
 
-      const planes: THREE.Mesh[] = []
-      const layerDefs = [
-        { w: 2.4, h: 1.9, op: 0.2, spin: 0.016 },
-        { w: 1.9, h: 1.55, op: 0.14, spin: -0.02 },
-        { w: 1.45, h: 1.2, op: 0.1, spin: 0.024 },
-      ]
-      layerDefs.forEach((layer, i) => {
-        const mat = new THREE.MeshBasicMaterial({
-          map: nebulaTexture(sub.nebulaA, sub.nebulaB, si * 19 + i * 5),
-          color: new THREE.Color(sub.color),
-          transparent: true,
-          alphaTest: 0.015,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-          side: THREE.DoubleSide,
-          opacity: layer.op,
-        })
-        const mesh = new THREE.Mesh(
-          new THREE.PlaneGeometry(sub.radius * layer.w, sub.radius * layer.h),
-          mat,
-        )
-        mesh.position.set(
-          (hash(si, i + 1) - 0.5) * sub.radius * 0.4,
-          (hash(si, i + 2) - 0.5) * sub.radius * 0.3,
-          (hash(si, i + 3) - 0.5) * sub.radius * 0.4,
-        )
-        mesh.userData.spin = hash(si, i + 4) * Math.PI * 2
-        mesh.userData.spinSpeed = layer.spin + hash(si, i + 5) * 0.01
-        mesh.userData.baseOpacity = layer.op
-        planes.push(mesh)
-        group.add(mesh)
-      })
-
-      const color = new THREE.Color(sub.color)
-      const glows: THREE.Mesh[] = []
-      const glowOp = 0.025
-      const glowSphere = new THREE.Mesh(
-        new THREE.SphereGeometry(sub.radius * 0.9, 20, 20),
-        new THREE.MeshBasicMaterial({
-          color: color.clone().offsetHSL(0, -0.04, 0.05),
-          transparent: true,
-          opacity: glowOp,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-        }),
-      )
-      glowSphere.userData.baseOpacity = glowOp
-      glows.push(glowSphere)
-      group.add(glowSphere)
-
-      // Lightweight dust for local web
-      const count = 280
-      const pos = new Float32Array(count * 3)
-      const col = new Float32Array(count * 3)
-      const base = color.clone()
-      for (let i = 0; i < count; i++) {
-        const u = hash(i, si + 90)
-        const v = hash(i, si + 91)
-        const w = hash(i, si + 92)
-        const theta = u * Math.PI * 2
-        const phi = Math.acos(2 * v - 1)
-        const rr = sub.radius * Math.pow(w, 0.42) * (0.3 + hash(i, si + 93) * 0.7)
-        pos[i * 3] = rr * Math.sin(phi) * Math.cos(theta)
-        pos[i * 3 + 1] = rr * Math.cos(phi) * 0.55
-        pos[i * 3 + 2] = rr * Math.sin(phi) * Math.sin(theta)
-        const shade = 0.45 + hash(i, si + 94) * 0.55
-        col[i * 3] = base.r * shade
-        col[i * 3 + 1] = base.g * shade
-        col[i * 3 + 2] = base.b * shade
-      }
-      const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
-      geo.setAttribute('color', new THREE.BufferAttribute(col, 3))
-      const particles = new THREE.Points(
-        geo,
-        new THREE.PointsMaterial({
-          map: this.mistParticleTex,
-          size: 0.5,
-          vertexColors: true,
-          transparent: true,
-          opacity: 0.28,
-          alphaTest: 0.02,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-          sizeAttenuation: true,
-        }),
-      )
-      group.add(particles)
-
-      this.scene.add(group)
-      this.subNebulaHandles.push({
-        sub,
-        group,
-        planes,
-        glows,
-        particles,
-        particleBaseOpacity: 0.28,
-        particleBaseSize: 0.5,
-      })
-    })
-  }
-
-  private makeClusterParticles(genre: Genre, seed: number): THREE.Points {
-    // Dense dusty core so artists feel embedded in smoke
+  private makeClusterParticles(genre: Genre, seed: number, skel: SkelPoint[]): THREE.Points {
+    // Dust sampled along the branches/pillars so it follows the cloud's shape.
     const count = 1400
     const pos = new Float32Array(count * 3)
     const col = new Float32Array(count * 3)
     const base = new THREE.Color(genre.color)
     const alt = base.clone().offsetHSL(0.04, -0.1, 0.15)
     for (let i = 0; i < count; i++) {
-      const u = hash(i, seed + 30)
-      const v = hash(i, seed + 31)
-      const w = hash(i, seed + 32)
-      const theta = u * Math.PI * 2
-      const phi = Math.acos(2 * v - 1)
-      // Tighter radial falloff (pow 0.38) — clustered smoky volume
-      const rr = genre.radius * Math.pow(w, 0.38) * (0.28 + hash(i, seed + 33) * 0.72)
-      pos[i * 3] = rr * Math.sin(phi) * Math.cos(theta)
-      pos[i * 3 + 1] = rr * Math.cos(phi) * 0.5
-      pos[i * 3 + 2] = rr * Math.sin(phi) * Math.sin(theta)
+      const sp = skel[Math.floor(hash(i, seed + 30) * skel.length) % skel.length]
+      const u = hash(i, seed + 31) * 2 - 1, v = hash(i, seed + 32) * 2 - 1, w = hash(i, seed + 33) * 2 - 1
+      const k = sp.r * 0.9 * Math.pow(hash(i, seed + 36), 0.6)
+      const len = Math.hypot(u, v, w) || 1
+      pos[i * 3] = sp.p.x + (u / len) * k
+      pos[i * 3 + 1] = sp.p.y + (v / len) * k * (sp.pillar ? 1.6 : 1)
+      pos[i * 3 + 2] = sp.p.z + (w / len) * k
       const c = hash(i, seed + 34) > 0.55 ? alt : base
       const shade = 0.5 + hash(i, seed + 35) * 0.5
       col[i * 3] = c.r * shade
@@ -1099,7 +1017,7 @@ export class GalaxyScene {
         size: 0.7,
         vertexColors: true,
         transparent: true,
-        opacity: 0.38,
+        opacity: 0.34,
         alphaTest: 0.02,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
