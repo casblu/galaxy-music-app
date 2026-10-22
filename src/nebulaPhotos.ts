@@ -29,8 +29,8 @@ export const GENRE_NEBULA_PHOTO: Record<GenreId, NebulaPhoto> = {
   },
   rnb: {
     src: './nebulae/trifid.jpg',
-    name: 'Trifid Nebula',
-    nasaId: 'PIA07226',
+    name: 'Storm of Stars in the Trifid Nebula',
+    nasaId: 'PIA17834',
   },
   electronic: {
     src: './nebulae/helix.jpg',
