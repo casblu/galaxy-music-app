@@ -311,3 +311,6 @@ frame()
 if (new URLSearchParams(location.search).has('debug')) {
   ;(window as unknown as Record<string, unknown>).__cosmoly = { galaxy, fly }
 }
+
+// Debug hook for automated screenshots: add ?debug to the URL.
+if (location.search.includes('debug')) Object.assign(window, { __galaxy: galaxy, __fly: fly })

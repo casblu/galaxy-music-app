@@ -5,6 +5,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import {
   ARTISTS,
+  GENRE_BY_ID,
   GENRES,
   SUBGENRES,
   START_INSIDE_POS,
@@ -23,6 +24,9 @@ import { GENRE_NEBULA_PHOTO } from './nebulaPhotos.ts'
  * silhouette is always fully transparent — never a hard circle — and fades out as the camera
  * nears/enters the sphere so close-ups show only soft light.
  */
+/** Star visibility vs camera distance to genre center, in genre radii */
+const STAR_VIS_FAR = 1.6
+const STAR_VIS_NEAR = 1.0
 const MEMORIAL_GOLD = 0xffe7b0
 
 class SoftGlowMaterial extends THREE.ShaderMaterial {
@@ -84,6 +88,10 @@ export type StarHandle = {
   baseScale: number
   /** Extra wide warm halo for memorial stars */
   memorialHalo?: THREE.Mesh
+  /** 0..1 nebula-proximity visibility (stars hidden from far away) */
+  vis: number
+  genreCenter: THREE.Vector3
+  genreRadius: number
 }
 
 export type NebulaHandle = {
@@ -309,6 +317,7 @@ export class GalaxyScene {
   nebulaHandles: NebulaHandle[] = []
   private starById = new Map<string, StarHandle>()
   private raycaster = new THREE.Raycaster()
+  private genreVis = new Map<string, number>()
   private pickables: THREE.Object3D[] = []
   private clock = new THREE.Clock()
   private lastDt = 1 / 60
@@ -457,7 +466,8 @@ export class GalaxyScene {
         const id = obj.userData.artistId as string | undefined
         if (id) {
           const handle = this.starById.get(id)
-          return handle?.artist ?? null
+          if (!handle || handle.vis < 0.35) break
+          return handle.artist
         }
         obj = obj.parent
       }
@@ -468,6 +478,7 @@ export class GalaxyScene {
   nearest(origin: THREE.Vector3): { artist: Artist; distance: number } | null {
     let best: { artist: Artist; distance: number } | null = null
     for (const star of this.stars) {
+      if (star.vis < 0.35) continue
       const d = origin.distanceTo(star.group.position)
       if (!best || d < best.distance) best = { artist: star.artist, distance: d }
     }
@@ -563,7 +574,22 @@ export class GalaxyScene {
     }
 
     const cam = this.camera.position
+    // Per-genre visibility: stars only appear near/inside their nebula.
+    this.genreVis.clear()
     for (const star of this.stars) {
+      let v = this.genreVis.get(star.artist.genreId)
+      if (v === undefined) {
+        const k = cam.distanceTo(star.genreCenter) / star.genreRadius
+        const x = Math.max(0, Math.min(1, (STAR_VIS_FAR - k) / (STAR_VIS_FAR - STAR_VIS_NEAR)))
+        v = x * x * (3 - 2 * x)
+        this.genreVis.set(star.artist.genreId, v)
+      }
+      star.vis = v
+      star.group.visible = v > 0.005
+    }
+    for (const star of this.stars) {
+      if (!star.group.visible) continue
+      const vis = star.vis
       const selected =
         star.artist.baseId === this.selectedId || star.artist.id === this.selectedId
       const playing =
@@ -594,6 +620,7 @@ export class GalaxyScene {
       // Slightly punchier emissive core when shrunk to a spark (still cinematic, not bloom-wash)
       const coreMat = star.core.material as unknown as SoftGlowMaterial
       coreMat.emissiveIntensity = 1.6 + close * 0.55
+      coreMat.opacity = vis
       if (star.memorialHalo) {
         // Gentle two-frequency shimmer; brighter and readable from far zoom.
         const shimmer = 0.85 + Math.sin(t * 1.3 + star.pulse) * 0.1 + Math.sin(t * 3.7 + star.pulse * 2) * 0.05
@@ -602,8 +629,10 @@ export class GalaxyScene {
         glowMat.opacity = (selected ? 0.16 : 0.11) * shimmer * amp * (1 - close * 0.85)
         const farBoost = 1 + Math.min(1, dist / 120) * 0.8
         star.memorialHalo.scale.setScalar(star.baseScale * 7 * farBoost * (0.96 + shimmer * 0.06))
-        ;(star.memorialHalo.material as unknown as SoftGlowMaterial).opacity = 0.09 * shimmer * (1 - close * 0.9)
+        ;(star.memorialHalo.material as unknown as SoftGlowMaterial).opacity = 0.09 * shimmer * (1 - close * 0.9) * vis
       }
+      shellMat.opacity *= vis
+      glowMat.opacity *= vis
     }
 
     this.updateStarMist(t, this.lastDt)
@@ -1161,6 +1190,9 @@ export class GalaxyScene {
         pulse: hash(artist.name.length, 4.2) * Math.PI * 2,
         baseScale: coreScale,
         memorialHalo,
+        vis: 0,
+        genreCenter: new THREE.Vector3(...GENRE_BY_ID[artist.genreId].center),
+        genreRadius: GENRE_BY_ID[artist.genreId].radius,
       }
       this.stars.push(handle)
       this.starById.set(artist.id, handle)
@@ -1270,7 +1302,7 @@ export class GalaxyScene {
       const sel = this.starById.get(this.selectedId)
       if (sel) {
         const d = cam.distanceTo(sel.group.position)
-        if (d < MIST_FAR) {
+        if (d < MIST_FAR && sel.vis > 0.05) {
           target = sel
           bestDist = d
         }
@@ -1279,6 +1311,7 @@ export class GalaxyScene {
     if (!target) {
       let bestD2 = Infinity
       for (const star of this.stars) {
+        if (star.vis < 0.05) continue
         const d2 = cam.distanceToSquared(star.group.position)
         if (d2 < bestD2) {
           bestD2 = d2
@@ -1294,6 +1327,7 @@ export class GalaxyScene {
       desired = Math.max(0, Math.min(1, desired))
       // Soften on low FPS tiers
       desired *= this.quality === 2 ? 1 : this.quality === 1 ? 0.72 : 0.42
+      desired *= target.vis
     }
     this.mistIntensity += (desired - this.mistIntensity) * Math.min(1, dt * 4.5)
 
